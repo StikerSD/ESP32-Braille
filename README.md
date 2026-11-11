@@ -119,7 +119,7 @@ Example with the letter **d** (dots 1, 4 and 5):
 
 The result is a byte with one bit per dot (bit 0 = dot 1, …, bit 5 = dot 6).
 
-### From chord to letter
+### Chords
 
 - **Filter:** each dot has a counter that goes up when the dot shows up in a scan and down when it doesn't. A dot only counts once its counter reaches 3, and is only released when the counter drops back to 0. This rejects noise and tolerates flaky contacts.
 - **Chord:** while any button is held, dots are accumulated with OR. Once everything has been released for 120 ms, the chord closes.
