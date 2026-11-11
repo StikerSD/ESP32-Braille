@@ -4,353 +4,353 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-#define TEMPO_ACORDE_MS 120        // tempo com tudo solto para fechar o acorde (aumente se ainda falhar)
-#define CONFIRMA_LEITURAS 3        // contagem minima para um ponto valer (~4 ms com contato bom)
-#define TETO_CONTAGEM 8            // limite da contagem: define quanto tempo o ponto "sobrevive" a falhas
-#define TEMPO_PRESO_MS 3000        // avisa no Serial se algum ponto ficar apertado mais que isso
-#define USAR_BOTAO_BOOT 1          // 1 = botao BOOT como espaco / apagar / limpar
-#define PINO_BOOT 0
-#define TEMPO_LONGO_MS 700
-#define TEMPO_MUITO_LONGO_MS 2000
+#define CHORD_TIMEOUT_MS 120       // time with everything released to close the chord (increase if it still fails)
+#define CONFIRM_READS 3            // minimum count for a dot to be valid (~4 ms with good contact)
+#define COUNT_CEILING 8            // count limit: sets how long the dot "survives" failures
+#define STUCK_TIME_MS 3000         // warns on Serial if any dot stays pressed longer than this
+#define USE_BOOT_BUTTON 1          // 1 = BOOT button as space / delete / clear
+#define BOOT_PIN 0
+#define LONG_PRESS_MS 700
+#define VERY_LONG_PRESS_MS 2000
 
-const int PINOS_SAIDA_147[4] = {32, 33, 34, 35};              // A, B, C, D
-const int PINOS_MASCARA[6]   = {13, 14, 27, 26, 25, 23};      // pontos 1..6
-const int NUM_PONTOS = 6;
+const int OUTPUT_PINS_147[4] = {32, 33, 34, 35};              // A, B, C, D
+const int MASK_PINS[6]       = {13, 14, 27, 26, 25, 23};      // dots 1..6
+const int NUM_DOTS = 6;
 
-const int PINO_SDA = 21;
-const int PINO_SCL = 22;
+const int SDA_PIN = 21;
+const int SCL_PIN = 22;
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
-bool temDisplay = false;
+bool hasDisplay = false;
 
-// Alfabeto braille: pontos de cada letra de 'a' a 'z'
-const char *PONTOS_LETRA[26] = {
+// Braille alphabet: dots of each letter from 'a' to 'z'
+const char *LETTER_DOTS[26] = {
   "1",     "12",    "14",    "145",   "15",    "124",   "1245",  "125",   "24",    "245",
   "13",    "123",   "134",   "1345",  "135",   "1234",  "12345", "1235",  "234",   "2345",
   "136",   "1236",  "2456",  "1346",  "13456", "1356"
 };
-byte tabela[26];   // mascara de bits de cada letra (bit0 = ponto 1 ... bit5 = ponto 6)
+byte table[26];   // bit mask of each letter (bit0 = dot 1 ... bit5 = dot 6)
 
-const int TAM_MAX = 96;            // 6 linhas de 16 caracteres
-char texto[TAM_MAX + 1];
-int tamanho = 0;
-char ultimaLetra = ' ';
+const int MAX_LEN = 96;            // 6 lines of 16 characters
+char text[MAX_LEN + 1];
+int textLength = 0;
+char lastLetter = ' ';
 
-byte mascaraDe(const char *pontos) {
+byte maskOf(const char *dots) {
   byte m = 0;
-  for (; *pontos; pontos++) m |= (1 << (*pontos - '1'));
+  for (; *dots; dots++) m |= (1 << (*dots - '1'));
   return m;
 }
 
-char letra(byte c) {
+char letter(byte c) {
   for (int i = 0; i < 26; i++) {
-    if (tabela[i] == c) return 'a' + i;
+    if (table[i] == c) return 'a' + i;
   }
   return '?';
 }
 
-byte lerBruto() {   // saida do 147 (BCD invertido) numa unica passada
+byte readRaw() {   // 147 output (inverted BCD) in a single pass
   byte v = 0;
   for (int i = 0; i < 4; i++) {
-    if (digitalRead(PINOS_SAIDA_147[i]) == LOW) v |= (1 << i);
+    if (digitalRead(OUTPUT_PINS_147[i]) == LOW) v |= (1 << i);
   }
   return v;
 }
 
-// Leitura estavel: so aceita quando duas leituras seguidas coincidem.
-// Devolve: 0 = nenhuma tecla, 1..6 = ponto de maior numero apertado
-byte lerPrioridade() {
-  byte anterior = lerBruto();
+// Stable reading: only accepts when two consecutive readings match.
+// Returns: 0 = no key, 1..6 = highest-numbered dot pressed
+byte readPriority() {
+  byte previous = readRaw();
   for (int t = 0; t < 4; t++) {
     delayMicroseconds(5);
-    byte atual = lerBruto();
-    if (atual == anterior) return atual;
-    anterior = atual;
+    byte current = readRaw();
+    if (current == previous) return current;
+    previous = current;
   }
-  return anterior;
+  return previous;
 }
 
-void limparMascaras() {
-  for (int i = 0; i < 6; i++) digitalWrite(PINOS_MASCARA[i], LOW);
+void clearMasks() {
+  for (int i = 0; i < 6; i++) digitalWrite(MASK_PINS[i], LOW);
 }
 
-byte falhaMascara = 0;   // ponto que continuou ativo mesmo mascarado (0 = nenhum)
+byte maskFailure = 0;   // dot that stayed active even when masked (0 = none)
 
-// Varre o acorde atual. Devolve os pontos apertados (bit0 = ponto 1).
-byte varrer() {
-  byte celula = 0;
-  limparMascaras();
+// Scans the current chord. Returns the pressed dots (bit0 = dot 1).
+byte scan() {
+  byte cell = 0;
+  clearMasks();
   delayMicroseconds(30);
-  for (int n = 0; n < NUM_PONTOS; n++) {
-    byte v = lerPrioridade();
-    if (v == 0 || v > NUM_PONTOS) break;        // nada apertado (ou leitura invalida)
+  for (int n = 0; n < NUM_DOTS; n++) {
+    byte v = readPriority();
+    if (v == 0 || v > NUM_DOTS) break;          // nothing pressed (or invalid reading)
     byte bit = 1 << (v - 1);
-    if (celula & bit) { falhaMascara = v; break; }   // mesmo ponto de novo: a mascara nao funcionou
-    celula |= bit;
-    digitalWrite(PINOS_MASCARA[v - 1], HIGH);   // mascara esse ponto
+    if (cell & bit) { maskFailure = v; break; }      // same dot again: the mask did not work
+    cell |= bit;
+    digitalWrite(MASK_PINS[v - 1], HIGH);       // masks this dot
     delayMicroseconds(30);
   }
-  limparMascaras();
-  return celula;
+  clearMasks();
+  return cell;
 }
 
-// ---------------------------------------------------------------- tela
+// ---------------------------------------------------------------- screen
 
-const int CEL_X[2] = {106, 119};   // colunas da celula braille (pontos 1-3 | 4-5-6)
-const int CEL_Y[3] = {6, 18, 30};  // linhas da celula
-const int CEL_R = 4;
+const int CELL_X[2] = {106, 119};  // braille cell columns (dots 1-3 | 4-5-6)
+const int CELL_Y[3] = {6, 18, 30}; // cell rows
+const int CELL_R = 4;
 
-void desenha(byte celula) {
-  if (!temDisplay) return;
+void draw(byte cell) {
+  if (!hasDisplay) return;
 
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
 
-  // texto digitado: ate 6 linhas de 16 caracteres
-  for (int linha = 0; linha < 6; linha++) {
-    int ini = linha * 16;
-    if (ini >= tamanho) break;
+  // typed text: up to 6 lines of 16 characters
+  for (int line = 0; line < 6; line++) {
+    int start = line * 16;
+    if (start >= textLength) break;
     char buf[17];
     int n = 0;
-    for (int i = ini; i < tamanho && n < 16; i++) buf[n++] = texto[i];
+    for (int i = start; i < textLength && n < 16; i++) buf[n++] = text[i];
     buf[n] = 0;
-    display.setCursor(0, linha * 10);
+    display.setCursor(0, line * 10);
     display.print(buf);
   }
 
   display.drawFastVLine(98, 0, 64, SSD1306_WHITE);
 
-  // celula braille: preenchido = ponto apertado
+  // braille cell: filled = pressed dot
   for (int k = 1; k <= 6; k++) {
-    int x = CEL_X[(k - 1) / 3];
-    int y = CEL_Y[(k - 1) % 3];
-    if (celula & (1 << (k - 1))) display.fillCircle(x, y, CEL_R, SSD1306_WHITE);
-    else display.drawCircle(x, y, CEL_R, SSD1306_WHITE);
+    int x = CELL_X[(k - 1) / 3];
+    int y = CELL_Y[(k - 1) % 3];
+    if (cell & (1 << (k - 1))) display.fillCircle(x, y, CELL_R, SSD1306_WHITE);
+    else display.drawCircle(x, y, CELL_R, SSD1306_WHITE);
   }
 
-  // ultima letra reconhecida
-  if (ultimaLetra != ' ') {
-    char grande[2] = { ultimaLetra, 0 };
+  // last recognized letter
+  if (lastLetter != ' ') {
+    char big[2] = { lastLetter, 0 };
     display.setTextSize(3);
     display.setCursor(106, 40);
-    display.print(grande);
+    display.print(big);
   }
 
   display.display();
 }
 
-// ---------------------------------------------------------------- texto
+// ---------------------------------------------------------------- text
 
-void adicionaChar(char ch) {
-  if (tamanho >= TAM_MAX) {                    // cheio: descarta a primeira linha
-    memmove(texto, texto + 16, TAM_MAX - 16);
-    tamanho -= 16;
+void addChar(char ch) {
+  if (textLength >= MAX_LEN) {                 // full: discards the first line
+    memmove(text, text + 16, MAX_LEN - 16);
+    textLength -= 16;
   }
-  texto[tamanho++] = ch;
-  texto[tamanho] = 0;
+  text[textLength++] = ch;
+  text[textLength] = 0;
 }
 
-void emiteLetra(byte c) {
-  char l = letra(c);
-  ultimaLetra = l;
-  if (l != '?') adicionaChar(l);               // acorde sem letra nao entra no texto
+void emitLetter(byte c) {
+  char l = letter(c);
+  lastLetter = l;
+  if (l != '?') addChar(l);                    // chord with no letter does not go into the text
 
   Serial.print(l);
-  Serial.print("   <- pontos:");
+  Serial.print("   <- dots:");
   for (int k = 1; k <= 6; k++) {
     if (c & (1 << (k - 1))) { Serial.print(" "); Serial.print(k); }
   }
   Serial.println();
 }
 
-// ---------------------------------------------------------------- diagnostico de mau contato
+// ---------------------------------------------------------------- bad contact diagnostics
 
-byte vistoBruto = 0;               // pontos que apareceram em alguma varredura, confirmados ou nao
-unsigned long ultimoBruto = 0;     // ultima vez que algum ponto apareceu na varredura
+byte rawSeen = 0;                  // dots that showed up in some scan, confirmed or not
+unsigned long lastRaw = 0;         // last time any dot showed up in the scan
 
-void avisaPerdidos(byte perdidos) {
-  if (!perdidos) return;
-  Serial.print("AVISO: ponto(s)");
+void warnMissed(byte missed) {
+  if (!missed) return;
+  Serial.print("WARNING: dot(s)");
   for (int k = 1; k <= 6; k++) {
-    if (perdidos & (1 << (k - 1))) { Serial.print(" "); Serial.print(k); }
+    if (missed & (1 << (k - 1))) { Serial.print(" "); Serial.print(k); }
   }
-  Serial.println(" apareceram mas nao foram confirmados (mau contato?)");
+  Serial.println(" showed up but were not confirmed (bad contact?)");
 }
 
-// ---------------------------------------------------------------- acorde e comandos
+// ---------------------------------------------------------------- chord and commands
 
-byte acorde = 0;
-bool ativo = false;
-unsigned long ultimoVisto = 0;   // ultima vez que algum ponto confirmado foi visto
+byte chord = 0;
+bool active = false;
+unsigned long lastSeen = 0;      // last time any confirmed dot was seen
 
-// Se ainda houver um acorde esperando fechar, emite a letra antes do comando.
-// Sem isso, um espaco dado logo depois de soltar as teclas entrava ANTES da letra.
-void fecharAcordePendente() {
-  if (ativo && acorde) emiteLetra(acorde);
-  acorde = 0;
-  ativo = false;
-  vistoBruto = 0;
+// If there is still a chord waiting to close, emits the letter before the command.
+// Without this, a space given right after releasing the keys went in BEFORE the letter.
+void closePendingChord() {
+  if (active && chord) emitLetter(chord);
+  chord = 0;
+  active = false;
+  rawSeen = 0;
 }
 
-void comandoEspaco() {
-  fecharAcordePendente();
-  adicionaChar(' ');
-  ultimaLetra = ' ';
-  Serial.println("[espaco]");
-  desenha(0);
+void spaceCommand() {
+  closePendingChord();
+  addChar(' ');
+  lastLetter = ' ';
+  Serial.println("[space]");
+  draw(0);
 }
 
-void comandoApagar() {
-  fecharAcordePendente();
-  if (tamanho > 0) { tamanho--; texto[tamanho] = 0; }
-  ultimaLetra = ' ';
-  Serial.println("[apagar]");
-  desenha(0);
+void deleteCommand() {
+  closePendingChord();
+  if (textLength > 0) { textLength--; text[textLength] = 0; }
+  lastLetter = ' ';
+  Serial.println("[delete]");
+  draw(0);
 }
 
-void comandoLimpar() {
-  fecharAcordePendente();
-  tamanho = 0;
-  texto[0] = 0;
-  ultimaLetra = ' ';
-  Serial.println("[limpar]");
-  desenha(0);
+void clearCommand() {
+  closePendingChord();
+  textLength = 0;
+  text[0] = 0;
+  lastLetter = ' ';
+  Serial.println("[clear]");
+  draw(0);
 }
 
-// ---------------------------------------------------------------- botao BOOT
+// ---------------------------------------------------------------- BOOT button
 
-bool bootAnterior = false;
-unsigned long bootDesde = 0;
-bool longoFeito = false;
-bool muitoLongoFeito = false;
+bool bootPrevious = false;
+unsigned long bootSince = 0;
+bool longDone = false;
+bool veryLongDone = false;
 
-void tratarBotaoBoot(unsigned long agora) {
-#if USAR_BOTAO_BOOT
-  bool apertado = (digitalRead(PINO_BOOT) == LOW);
+void handleBootButton(unsigned long now) {
+#if USE_BOOT_BUTTON
+  bool pressed = (digitalRead(BOOT_PIN) == LOW);
 
-  if (apertado && !bootAnterior) {             // acabou de apertar
-    bootDesde = agora;
-    longoFeito = false;
-    muitoLongoFeito = false;
+  if (pressed && !bootPrevious) {              // just pressed
+    bootSince = now;
+    longDone = false;
+    veryLongDone = false;
   }
-  if (apertado) {
-    unsigned long t = agora - bootDesde;
-    if (!longoFeito && t >= TEMPO_LONGO_MS) { longoFeito = true; comandoApagar(); }
-    if (!muitoLongoFeito && t >= TEMPO_MUITO_LONGO_MS) { muitoLongoFeito = true; comandoLimpar(); }
-  } else if (bootAnterior) {                   // acabou de soltar
-    unsigned long t = agora - bootDesde;
-    if (!longoFeito && t >= 30) comandoEspaco();   // toque curto (ignora ruido abaixo de 30 ms)
+  if (pressed) {
+    unsigned long t = now - bootSince;
+    if (!longDone && t >= LONG_PRESS_MS) { longDone = true; deleteCommand(); }
+    if (!veryLongDone && t >= VERY_LONG_PRESS_MS) { veryLongDone = true; clearCommand(); }
+  } else if (bootPrevious) {                   // just released
+    unsigned long t = now - bootSince;
+    if (!longDone && t >= 30) spaceCommand();      // short press (ignores noise below 30 ms)
   }
-  bootAnterior = apertado;
+  bootPrevious = pressed;
 #endif
 }
 
 // ---------------------------------------------------------------- setup / loop
 
-byte contagem[6] = {0, 0, 0, 0, 0, 0};   // sobe quando o ponto aparece, desce quando nao aparece
-byte confirmados = 0;                    // pontos que passaram no filtro (com histerese)
-unsigned long inicioAcorde = 0;
-bool avisouPreso = false;
-unsigned long ultimoAvisoMascara = 0;
+byte counts[6] = {0, 0, 0, 0, 0, 0};     // goes up when the dot shows up, down when it does not
+byte confirmed = 0;                      // dots that passed the filter (with hysteresis)
+unsigned long chordStart = 0;
+bool stuckWarned = false;
+unsigned long lastMaskWarning = 0;
 
-void varreduraI2C() {
-  int achados = 0;
+void scanI2C() {
+  int found = 0;
   for (int addr = 1; addr < 127; addr++) {
     Wire.beginTransmission(addr);
     if (Wire.endTransmission() == 0) {
       char buf[40];
-      snprintf(buf, sizeof(buf), "I2C: dispositivo em 0x%02X", addr);
+      snprintf(buf, sizeof(buf), "I2C: device at 0x%02X", addr);
       Serial.println(buf);
-      achados++;
+      found++;
     }
   }
-  if (achados == 0) Serial.println("I2C: nenhum dispositivo encontrado (confira SDA, SCL, VCC e GND)");
+  if (found == 0) Serial.println("I2C: no device found (check SDA, SCL, VCC and GND)");
 }
 
 void setup() {
   Serial.begin(115200);
 
-  for (int i = 0; i < 26; i++) tabela[i] = mascaraDe(PONTOS_LETRA[i]);
+  for (int i = 0; i < 26; i++) table[i] = maskOf(LETTER_DOTS[i]);
 
-  for (int i = 0; i < 4; i++) pinMode(PINOS_SAIDA_147[i], INPUT);
-  for (int i = 0; i < 6; i++) pinMode(PINOS_MASCARA[i], OUTPUT);
-  limparMascaras();
-#if USAR_BOTAO_BOOT
-  pinMode(PINO_BOOT, INPUT_PULLUP);
+  for (int i = 0; i < 4; i++) pinMode(OUTPUT_PINS_147[i], INPUT);
+  for (int i = 0; i < 6; i++) pinMode(MASK_PINS[i], OUTPUT);
+  clearMasks();
+#if USE_BOOT_BUTTON
+  pinMode(BOOT_PIN, INPUT_PULLUP);
 #endif
 
-  Wire.begin(PINO_SDA, PINO_SCL);
-  varreduraI2C();
+  Wire.begin(SDA_PIN, SCL_PIN);
+  scanI2C();
 
-  if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) temDisplay = true;        // endereco mais comum
-  else if (display.begin(SSD1306_SWITCHCAPVCC, 0x3D)) temDisplay = true;   // alguns modulos
-  else Serial.println("OLED nao encontrado em 0x3C nem 0x3D. Continuando so com o Serial.");
+  if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) hasDisplay = true;        // most common address
+  else if (display.begin(SSD1306_SWITCHCAPVCC, 0x3D)) hasDisplay = true;   // some modules
+  else Serial.println("OLED not found at 0x3C or 0x3D. Continuing with Serial only.");
 
-  texto[0] = 0;
-  desenha(0);
-  Serial.println("Teclado braille pronto. Digite um acorde e solte as teclas.");
+  text[0] = 0;
+  draw(0);
+  Serial.println("Braille keyboard ready. Type a chord and release the keys.");
 }
 
 void loop() {
-  unsigned long agora = millis();
-  byte lido = varrer();
+  unsigned long now = millis();
+  byte reading = scan();
 
-  if (lido) { vistoBruto |= lido; ultimoBruto = agora; }
+  if (reading) { rawSeen |= reading; lastRaw = now; }
 
-  // Filtro de ruido com tolerancia: a contagem sobe quando o ponto aparece e desce quando
-  // nao aparece. Um pico isolado (sobe 1, desce 1) nunca chega a CONFIRMA_LEITURAS, mas um
-  // aperto com contato instavel (aparece na maioria das varreduras) acaba confirmando.
-  // O ponto so deixa de valer quando a contagem volta a zero (histerese).
-  for (int k = 0; k < NUM_PONTOS; k++) {
+  // Noise filter with tolerance: the count goes up when the dot shows up and down when
+  // it does not. An isolated spike (up 1, down 1) never reaches CONFIRM_READS, but a
+  // press with unstable contact (shows up in most scans) ends up confirming.
+  // The dot only stops being valid when the count goes back to zero (hysteresis).
+  for (int k = 0; k < NUM_DOTS; k++) {
     byte bit = 1 << k;
-    if (lido & bit) { if (contagem[k] < TETO_CONTAGEM) contagem[k]++; }
-    else if (contagem[k] > 0) contagem[k]--;
+    if (reading & bit) { if (counts[k] < COUNT_CEILING) counts[k]++; }
+    else if (counts[k] > 0) counts[k]--;
 
-    if (contagem[k] >= CONFIRMA_LEITURAS) confirmados |= bit;
-    else if (contagem[k] == 0) confirmados &= ~bit;
+    if (counts[k] >= CONFIRM_READS) confirmed |= bit;
+    else if (counts[k] == 0) confirmed &= ~bit;
   }
-  byte c = confirmados;
+  byte c = confirmed;
 
   if (c) {
-    if (!ativo) { inicioAcorde = agora; avisouPreso = false; }
-    byte antes = acorde;
-    acorde |= c;                 // acumula enquanto houver tecla pressionada
-    ativo = true;
-    if (acorde != antes) desenha(acorde);   // mostra os pontos ao vivo na celula
-    ultimoVisto = millis();      // medido depois de desenhar (a tela leva alguns ms)
+    if (!active) { chordStart = now; stuckWarned = false; }
+    byte before = chord;
+    chord |= c;                  // accumulates while a key is pressed
+    active = true;
+    if (chord != before) draw(chord);       // shows the dots live on the cell
+    lastSeen = millis();         // measured after drawing (the screen takes a few ms)
 
-    if (!avisouPreso && (agora - inicioAcorde) >= TEMPO_PRESO_MS) {
-      avisouPreso = true;
-      Serial.print("AVISO: ponto(s)");
+    if (!stuckWarned && (now - chordStart) >= STUCK_TIME_MS) {
+      stuckWarned = true;
+      Serial.print("WARNING: dot(s)");
       for (int k = 1; k <= 6; k++) {
         if (c & (1 << (k - 1))) { Serial.print(" "); Serial.print(k); }
       }
-      Serial.println(" ativo(s) ha mais de 3 s sem soltar (botao travado ou mau contato?)");
+      Serial.println(" active for over 3 s without release (stuck button or bad contact?)");
     }
-  } else if (ativo && (millis() - ultimoVisto) >= TEMPO_ACORDE_MS) {
-    avisaPerdidos(vistoBruto & ~acorde);   // pontos que apareceram mas nao entraram na letra
-    vistoBruto = 0;
-    emiteLetra(acorde);          // tudo solto por tempo suficiente: acorde fechado
-    desenha(acorde);             // texto atualizado; a ultima celula continua na tela
-    acorde = 0;
-    ativo = false;
+  } else if (active && (millis() - lastSeen) >= CHORD_TIMEOUT_MS) {
+    warnMissed(rawSeen & ~chord);          // dots that showed up but did not go into the letter
+    rawSeen = 0;
+    emitLetter(chord);           // everything released long enough: chord closed
+    draw(chord);                 // text updated; the last cell stays on screen
+    chord = 0;
+    active = false;
   }
 
-  // Ponto que apareceu mas nunca foi confirmado (nenhum acorde chegou a abrir)
-  if (!ativo && vistoBruto && (agora - ultimoBruto) >= TEMPO_ACORDE_MS) {
-    avisaPerdidos(vistoBruto);
-    vistoBruto = 0;
+  // Dot that showed up but was never confirmed (no chord ever opened)
+  if (!active && rawSeen && (now - lastRaw) >= CHORD_TIMEOUT_MS) {
+    warnMissed(rawSeen);
+    rawSeen = 0;
   }
 
-  if (falhaMascara && (agora - ultimoAvisoMascara) >= 2000) {
-    ultimoAvisoMascara = agora;
-    Serial.print("AVISO: o ponto ");
-    Serial.print(falhaMascara);
-    Serial.println(" continuou ativo mesmo mascarado (a perna B do botao esta no GPIO certo?)");
+  if (maskFailure && (now - lastMaskWarning) >= 2000) {
+    lastMaskWarning = now;
+    Serial.print("WARNING: dot ");
+    Serial.print(maskFailure);
+    Serial.println(" stayed active even when masked (is the button's leg B on the right GPIO?)");
   }
-  falhaMascara = 0;
+  maskFailure = 0;
 
-  tratarBotaoBoot(agora);
+  handleBootButton(now);
   delay(1);
 }
